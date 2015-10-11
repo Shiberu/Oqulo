@@ -5,6 +5,8 @@ import sys
 import csv
 import matplotlib.pyplot as plt
 import multiprocessing as mp
+import scipy.spatial
+import numpy as np
 
 """
     identify.py
@@ -20,8 +22,9 @@ import multiprocessing as mp
 
 # Calibration function.
 # Follow terminal outputs for directions.
+# TODO: Remove duplicate code and improve formatting
 def calibrate(window=30.0, datapoints = 200):
-    ser = serial.Serial('/dev/cu.usbmodem1411', 9600)
+    ser = serial.Serial('/dev/cu.usbmodem1421', 9600)
     index = 0
     horiz_list = [0]*int(window)
     vert_list = [0]*int(window)
@@ -78,8 +81,8 @@ def calibrate(window=30.0, datapoints = 200):
             break
         count += 1
 
-    ser.flushInput()
     print("Horizontal Calibration completed. Flushing.")
+    ser.flushInput()
 
     index = 0
     count = 0
@@ -149,11 +152,36 @@ def calibrate(window=30.0, datapoints = 200):
 def wait_for_request(tup, window=30):
     # Initialize necessary data sources
     cam = cv2.VideoCapture(0)
-    ser = serial.Serial('/dev/cu.usbmodem1411', 9600)
+    ser = serial.Serial('/dev/cu.usbmodem1421', 9600, timeout=5)
+
+    # This is the camera image size we are expecting.
     height, width, z = (486, 648, 3)
+
+    # Retrieve the trainImages
+    targetPath = './targets'
+    trainImages = [[os.path.splitext(f)[0] ,cv2.imread('targets/' + f,0)] for f in os.listdir(targetPath) if os.path.isfile(os.path.join(targetPath, f)) and f != ".DS_Store"]
 
     # Calibration data
     (vert_avg, vert_min, vert_max, horiz_avg, horiz_min, horiz_max) = tup
+
+    # Initiate SIFT detector
+    sift = cv2.SIFT()
+
+    for ind in range(len(trainImages)):          # Object Name and trainImage
+        [objectName, train] = trainImages[ind]
+        if (objectName == '.DS_Store'):
+            continue
+        
+        print("Importing image for " + objectName + "...")
+        
+        # find the keypoints and descriptors with SIFT
+        kp1, des1 = sift.detectAndCompute(train,None)
+
+        trainImages[ind].append(kp1)
+        trainImages[ind].append(des1)
+        
+    print("Import completed.")
+
 
     # Helper funciton to retrieve serial data
     def read_current_sight ():
@@ -172,52 +200,121 @@ def wait_for_request(tup, window=30):
             recX = sum(arrx)/float(window)
             recY = sum(arry)/float(window)
             return recX, recY
-        except ValueError:
+        except: # Catch all exceptions; stop from crashing the code and prevent recalibration
             print("Error while detecting current direction of sight:")
             return 5, 5 
 
     # Helper funciton to capture image with camera
     def get_current_vision ():
-        print("Taking current vision:")
+        print("Taking a photo from camera:")
         ret_val, img = cam.read()
         img = cv2.flip(img, -1)
         img = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
-        print("Current vision taken.")
-        return img
+
+        MIN_MATCH_COUNT = 10
+
+        retObjs = []
+
+        print("Recognizing features...")
+        # find the keypoints and descriptors with SIFT
+        kp2, des2 = sift.detectAndCompute(img,None)
+
+        print("Identifying...")
+        for [objectName, train, kp1, des1] in trainImages:          # Object Name and trainImage
+            print("Looking for " + objectName + "...")
+
+            FLANN_INDEX_KDTREE = 0
+            index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+            search_params = dict(checks = 50)
+
+            flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+            matches = flann.knnMatch(des1,des2,k=2)
+
+            # store all the good matches as per Lowe's ratio test.
+            good = []
+            for m,n in matches:
+                if m.distance < 0.7*n.distance:
+                    good.append(m)
+
+            if len(good)>MIN_MATCH_COUNT:
+                print "Found!"
+                src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
+                dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
+
+                M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
+                matchesMask = mask.ravel().tolist()
+
+                h,w = train.shape
+                pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
+                dst = cv2.perspectiveTransform(pts,M)
+
+                retObjs.append([objectName, dst])
+            else:
+                print "Not enough matches are found - %d/%d" % (len(good),MIN_MATCH_COUNT)
+                matchesMask = None
+
+        # You want to locate the object boundaries only after all object search has been completed.
+        for [name, points] in retObjs:
+            cv2.polylines(img,[np.int32(points)],True,255,3, 16)
+
+        print("Current vision taken, marked, and identified")
+        return img, retObjs
 
     while True:
         raw_input("Press Enter for recognition:")
 
-        bmx, bmy = read_current_sight()
-        if (bmx == 5 and bmy == 5):
-            print("Hault; Error")
-            continue
+        # Perform image processing fist; this will take longer
+        img, retObjs = get_current_vision()
 
-        img = get_current_vision()
-        print(bmx)
-        print(bmy)
+        # Read in data from Arduino Serial
+        bmx, bmy = read_current_sight()
+        print("Current direction of sight: " + str(bmx) + "," + str(bmy))
+        if (bmx == 5 and bmy == 5):
+            print("Error: Skipping this instance; possible sensor data misread")
+            continue
+        
         dx = horiz_max - bmx
         dy = vert_max - bmy
-        print(horiz_max)
-        print(vert_max)
 
         pixX = int(dx / float(horiz_max-horiz_min) * width)
         pixY = height - int(dy / float(vert_max-vert_min) * height)
 
-        print(pixX)
-        print(pixY)
-        print(img.shape)
+        print("Mapped sight location: " + str(pixX) + "," + str(pixY))
 
-        for i in range(3):
-            for x in range(-5, 6):
-                for y in range(-5, 6):
-                    if i==0:
-                        img[pixY+y,pixX+x,i] = 255
-                    else:
-                        img[pixY+y,pixX+x,i] = 0
+        try:
+            for i in range(3):
+                for x in range(-5, 6):
+                    for y in range(-5, 6):
+                        if i==1:
+                            img[pixY+y,pixX+x,i] = 255
+                        else:
+                            img[pixY+y,pixX+x,i] = 0
 
+            cv2.imshow('Current Vision', img)
+            raw_input("Press Enter to proceed to identificaiton:")
 
-        cv2.imshow('Current Vision', img)
+        except: # Catch all exceptions; misread value can cause index error.
+            print("Error: Skipping this instance; possible sensor data misread")
+
+        # Approximate the closest object by looking for closest point.
+        spt = np.array([pixX, pixY])
+        min_dst = 9999
+        predObj = None
+        for [name, points] in retObjs:
+            for p in points:
+                curr_dst = scipy.spatial.distance.euclidean(p, spt)
+                if (curr_dst < min_dst):
+                    min_dst = curr_dst
+                    predObj = name
+        
+        if predObj is not None:
+            print("\n\n\n\n************************************************\n"+
+                "Are you looking at: " + predObj + "\n\n\n\n************************************************\n\n")
+        else:
+            print("\n\n\n\n************************************************\n"+
+                "Nothing discovered. Retry! \n\n\n\n************************************************\n\n")
+
 
 def identify():
     tup = calibrate()
