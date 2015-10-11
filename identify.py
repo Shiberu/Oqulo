@@ -292,7 +292,7 @@ def wait_for_request(tup, window=30):
 
         index+=1
     
-    FRAME_UPDATE = 50
+    FRAME_UPDATE = 15
     count = 0
 
     while True:
