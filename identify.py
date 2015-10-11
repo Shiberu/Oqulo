@@ -83,6 +83,8 @@ def calibrate(window=30.0, datapoints = 200):
 
     print("Horizontal Calibration completed. Flushing.")
     ser.flushInput()
+    if not ser.isOpen():
+        ser.open()
 
     index = 0
     count = 0
@@ -191,6 +193,8 @@ def wait_for_request(tup, window=30):
             arrx = []
             arry = []
             ser.flushInput()
+            if not ser.isOpen():
+                ser.open()
             while index < window:
                 point = ser.readline().split(',')
                 arrx.append(float(point[0]))
@@ -199,6 +203,7 @@ def wait_for_request(tup, window=30):
             print("Current direction of sight recognized.")
             recX = sum(arrx)/float(window)
             recY = sum(arry)/float(window)
+            ser.close()
             return recX, recY
         except: # Catch all exceptions; stop from crashing the code and prevent recalibration
             print("Error while detecting current direction of sight:")
@@ -261,6 +266,92 @@ def wait_for_request(tup, window=30):
         print("Current vision taken, marked, and identified")
         return img, retObjs
 
+    index = 0
+    count = 0
+    horiz_list = [0]*int(window)
+    vert_list = [0]*int(window)
+    horiz_avg = 0
+    vert_avg = 0
+
+    if (not ser.isOpen()):
+        ser.open()
+
+    # Initial polling for establishing moving average starting point.
+    while index < window:
+        point = ser.readline().split(',')
+        if len(point) < 2:
+            continue
+        horiz_avg = (horiz_avg*window - horiz_list[0] + float(point[0]))/window
+        vert_avg = (vert_avg*window - vert_list[0] + float(point[1]))/window
+        
+        horiz_list = horiz_list[1:]
+        vert_list = vert_list[1:]
+
+        horiz_list.append(float(point[0]))
+        vert_list.append(float(point[1]))
+
+        index+=1
+    
+    FRAME_UPDATE = 50
+    count = 0
+
+    while True:
+        point = ser.readline().split(',')
+        if len(point) <2:
+            continue
+        horiz_avg = (horiz_avg*window - horiz_list[0] + float(point[0]))/window
+        vert_avg = (vert_avg*window - vert_list[0] + float(point[1]))/window
+        
+        horiz_list = horiz_list[1:]
+        vert_list = vert_list[1:]
+
+        horiz_list.append(float(point[0]))
+        vert_list.append(float(point[1]))
+        
+        
+        
+        dx = horiz_max - horiz_avg
+        dy = vert_max - vert_avg
+
+        pixX = int(dx / float(horiz_max-horiz_min) * width)
+        pixY = height - int(dy / float(vert_max-vert_min) * height)
+
+        if (count == FRAME_UPDATE):
+            # Perform image processing fist; this will take longer
+            img, retObjs = get_current_vision()
+            for i in range(3):
+                for x in range(-5, 6):
+                    for y in range(-5, 6):
+                        if i==1:
+                            img[pixY+y,pixX+x,i] = 255
+                        else:
+                            img[pixY+y,pixX+x,i] = 0
+
+            cv2.imshow('Current Vision', img)
+            cv2.waitKey(1)
+
+            # Approximate the closest object by looking for closest point.
+            spt = np.array([pixX, pixY])
+            min_dst = 9999
+            predObj = None
+            for [name, points] in retObjs:
+                for p in points:
+                    curr_dst = scipy.spatial.distance.euclidean(p, spt)
+                    if (curr_dst < min_dst):
+                        min_dst = curr_dst
+                        predObj = name
+        
+            if predObj is not None:
+                print("\n\n\n\n************************************************\n"+
+                    "Are you looking at: " + predObj + "\n\n\n\n************************************************\n\n")
+            else:
+                print("\n\n\n\n************************************************\n"+
+                    "Nothing discovered. Retry! \n\n\n\n************************************************\n\n")
+            count = 0
+        else:
+            count += 1
+            continue
+    """
     while True:
         raw_input("Press Enter for recognition:")
 
@@ -314,7 +405,7 @@ def wait_for_request(tup, window=30):
         else:
             print("\n\n\n\n************************************************\n"+
                 "Nothing discovered. Retry! \n\n\n\n************************************************\n\n")
-
+    """
 
 def identify():
     tup = calibrate()
